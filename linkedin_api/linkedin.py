@@ -62,6 +62,7 @@ class Linkedin(object):
         proxies={},
         cookies=None,
         cookies_dir: str = "",
+        useragent: str = None,  # Add useragent parameter
     ):
         """Constructor method"""
         self.client = Client(
@@ -69,6 +70,7 @@ class Linkedin(object):
             debug=debug,
             proxies=proxies,
             cookies_dir=cookies_dir,
+            useragent=useragent,
         )
         logging.basicConfig(level=logging.DEBUG if debug else logging.INFO)
         self.logger = logger

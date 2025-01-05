@@ -49,11 +49,15 @@ class Client(object):
     }
 
     def __init__(
-        self, *, debug=False, refresh_cookies=False, proxies={}, cookies_dir: str = ""
+        self, *, debug=False, refresh_cookies=False, proxies={}, cookies_dir: str = "", useragent: str = None
     ):
         self.session = requests.session()
         self.session.proxies.update(proxies)
-        self.session.headers.update(Client.REQUEST_HEADERS)
+        # Update REQUEST_HEADERS with useragent if provided
+        headers = Client.REQUEST_HEADERS.copy()
+        if useragent:
+            headers["user-agent"] = useragent
+        self.session.headers.update(headers)
         self.proxies = proxies
         self.logger = logger
         self.metadata = {}

@@ -1282,9 +1282,9 @@ class Linkedin(object):
     def get_thread_v2(self, mailbox_urn: str, messaging_thread_urn: str) -> Dict:
         """Fetch a thread of messages using the new LinkedIn Voyager API.
 
-        :param mailbox_urn: URN of the mailbox
+        :param mailbox_urn: URN of the mailbox (user URN)
         :type mailbox_urn: str
-        :param messaging_thread_urn: URN of the messaging thread
+        :param messaging_thread_urn: URN of the messaging thread (Normally starts with something like "2-")
         :type messaging_thread_urn: str
 
         :return: Dictionary containing the message thread

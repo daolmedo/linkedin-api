@@ -1265,23 +1265,16 @@ class Linkedin(object):
         :rtype: dict
         """
         query_id = "messengerConversations.45338e053010d1c19147f92de6de3ae6"
-        variables = {
-            "query": {
-                "predicateUnions": [
-                    {
-                        "conversationCategoryPredicate": {
-                            "category": "PRIMARY_INBOX"
-                        }
-                    }
-                ]
-            },
-            "count": count,
-            "mailboxUrn": mailbox_urn,
-        }
+        variables = (
+            f"(query:(predicateUnions:List((conversationCategoryPredicate:(category:PRIMARY_INBOX)))),"
+            f"count:{count},"
+            f"mailboxUrn:urn%3Ali%3Afsd_profile%3A{mailbox_urn}"
+        )
         if next_cursor:
-            variables["nextCursor"] = next_cursor
+            variables += f",nextCursor:{next_cursor}"
+        variables += ")"
 
-        url = f"/voyagerMessagingGraphQL/graphql?queryId={query_id}&variables={quote(str(variables))}"
+        url = f"/voyagerMessagingGraphQL/graphql?queryId={query_id}&variables={variables}"
         res = self._fetch(url)
 
         return res.json()

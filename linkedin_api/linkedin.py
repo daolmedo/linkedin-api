@@ -1279,6 +1279,28 @@ class Linkedin(object):
 
         return res.json()
 
+    def get_thread_v2(self, mailbox_urn: str, messaging_thread_urn: str) -> Dict:
+        """Fetch a thread of messages using the new LinkedIn Voyager API.
+
+        :param mailbox_urn: URN of the mailbox
+        :type mailbox_urn: str
+        :param messaging_thread_urn: URN of the messaging thread
+        :type messaging_thread_urn: str
+
+        :return: Dictionary containing the message thread
+        :rtype: dict
+        """
+        query_id = "messengerMessages.455dde239612d966346c1d1c4352f648"
+        variables = (
+            f"(conversationUrn:urn%3Ali%3Amsg_conversation%3A"
+            f"(urn%3Ali%3Afsd_profile%3A{mailbox_urn}%2C{messaging_thread_urn}))"
+        )
+
+        url = f"/voyagerMessagingGraphQL/graphql?queryId={query_id}&variables={variables}"
+        res = self._fetch(url)
+
+        return res.json()
+
     def get_conversation(self, conversation_urn_id: str):
         """Fetch data about a given conversation.
 

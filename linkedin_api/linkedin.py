@@ -1251,6 +1251,41 @@ class Linkedin(object):
 
         return res.json()
 
+    def get_conversations_v2(self, mailbox_urn: str, count: int = 20, next_cursor: Optional[str] = None) -> Dict:
+        """Fetch list of conversations using the new LinkedIn Voyager API.
+
+        :param mailbox_urn: URN of the mailbox
+        :type mailbox_urn: str
+        :param count: Maximum amount of conversations to return
+        :type count: int
+        :param next_cursor: Cursor for pagination
+        :type next_cursor: str, optional
+
+        :return: Dictionary containing conversations and next cursor
+        :rtype: dict
+        """
+        query_id = "messengerConversations.45338e053010d1c19147f92de6de3ae6"
+        variables = {
+            "query": {
+                "predicateUnions": [
+                    {
+                        "conversationCategoryPredicate": {
+                            "category": "PRIMARY_INBOX"
+                        }
+                    }
+                ]
+            },
+            "count": count,
+            "mailboxUrn": mailbox_urn,
+        }
+        if next_cursor:
+            variables["nextCursor"] = next_cursor
+
+        url = f"/voyagerMessagingGraphQL/graphql?queryId={query_id}&variables={quote(str(variables))}"
+        res = self._fetch(url)
+
+        return res.json()
+
     def get_conversation(self, conversation_urn_id: str):
         """Fetch data about a given conversation.
 

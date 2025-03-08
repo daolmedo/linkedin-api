@@ -1293,7 +1293,7 @@ class Linkedin(object):
         query_id = "messengerMessages.455dde239612d966346c1d1c4352f648"
         variables = (
             f"(conversationUrn:urn%3Ali%3Amsg_conversation%3A"
-            f"(urn%3Ali%3Afsd_profile%3A{mailbox_urn}%2C{messaging_thread_urn}))"
+            f"%28urn%3Ali%3Afsd_profile%3A{mailbox_urn}%2C{quote(messaging_thread_urn)}%29)"
         )
 
         url = f"/voyagerMessagingGraphQL/graphql?queryId={query_id}&variables={variables}"

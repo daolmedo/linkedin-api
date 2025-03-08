@@ -1230,13 +1230,22 @@ class Linkedin(object):
 
         return item
 
-    def get_conversations(self):
+    def get_conversations(self, start=0, limit=20):
         """Fetch list of conversations the user is in.
+
+        :param start: How much to offset results by
+        :type start: int
+        :param limit: Maximum amount of conversations to return
+        :type limit: int
 
         :return: List of conversations
         :rtype: list
         """
-        params = {"keyVersion": "LEGACY_INBOX"}
+        params = {
+            "keyVersion": "LEGACY_INBOX",
+            "start": start,
+            "count": limit,
+        }
 
         res = self._fetch(f"/messaging/conversations", params=params)
 

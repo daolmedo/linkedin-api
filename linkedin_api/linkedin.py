@@ -1251,6 +1251,18 @@ class Linkedin(object):
 
         return res.json()
 
+    def get_globals(self) -> Dict:
+        """Fetch global navigation data from LinkedIn.
+
+        :return: Global navigation data
+        :rtype: dict
+        """
+        query_id = "voyagerFeedDashGlobalNavs.998834f8daa4cbca25417843e04f16b1"
+        url = f"/graphql?includeWebMetadata=true&variables=()&queryId={query_id}"
+        res = self._fetch(url)
+
+        return res.json()
+
     def get_conversations_v2(self, mailbox_urn: str, count: int = 20, next_cursor: Optional[str] = None) -> Dict:
         """Fetch list of conversations using the new LinkedIn Voyager API.
 

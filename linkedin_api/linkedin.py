@@ -1390,6 +1390,11 @@ class Linkedin(object):
     def get_globals(self) -> Dict:
         """Fetch global navigation data from LinkedIn.
 
+        .. note::
+            This method relies on a GraphQL ``queryId`` hash that LinkedIn may
+            rotate at any time.  To obtain your own mailbox URN, prefer using
+            :meth:`_resolve_public_id_to_urn` with your own public ID instead.
+
         :return: Global navigation data
         :rtype: dict
         """
@@ -1402,7 +1407,9 @@ class Linkedin(object):
     def get_conversations_v2(self, mailbox_urn: str, count: int = 20, next_cursor: Optional[str] = None) -> Dict:
         """Fetch list of conversations using the new LinkedIn Voyager API.
 
-        :param mailbox_urn: URN of the mailbox
+        :param mailbox_urn: Your profile URN ID (the part after
+            ``urn:li:fsd_profile:``).  Obtain it once with
+            ``_resolve_public_id_to_urn("your-public-id")`` and store it.
         :type mailbox_urn: str
         :param count: Maximum amount of conversations to return
         :type count: int
@@ -1442,9 +1449,12 @@ class Linkedin(object):
         richer data than v2: last message body, sender, participant names, and
         read/unread status are all included per conversation.
 
-        :param mailbox_urn: URN ID of the mailbox (your profile URN ID)
+        :param mailbox_urn: Your profile URN ID (the part after
+            ``urn:li:fsd_profile:``).  Obtain it once with
+            ``_resolve_public_id_to_urn("your-public-id")`` and store it —
+            it never changes for a given account.
         :type mailbox_urn: str
-        :param count: Maximum number of conversations to return
+        :param count: Maximum number of conversations to return (server cap: 25)
         :type count: int
         :param next_cursor: Cursor for pagination (from previous response metadata)
         :type next_cursor: str, optional
@@ -1555,12 +1565,16 @@ class Linkedin(object):
     def get_thread_v2(self, mailbox_urn: str, messaging_thread_urn: str) -> Dict:
         """Fetch a thread of messages using the new LinkedIn Voyager API.
 
-        :param mailbox_urn: URN of the mailbox (user URN)
+        :param mailbox_urn: Your profile URN ID (the part after
+            ``urn:li:fsd_profile:``).  Obtain it once with
+            ``_resolve_public_id_to_urn("your-public-id")`` and store it.
         :type mailbox_urn: str
-        :param messaging_thread_urn: URN of the messaging thread (Normally starts with something like "2-")
+        :param messaging_thread_urn: Thread ID (normally starts with ``2-``).
+            Get it from the ``thread_id`` field in :meth:`get_conversations_v3`.
         :type messaging_thread_urn: str
 
-        :return: Dictionary containing the message thread
+        :return: Dictionary containing the message thread.
+            Messages are in ``data.messengerMessagesBySyncToken.elements``.
         :rtype: dict
         """
         query_id = "messengerMessages.455dde239612d966346c1d1c4352f648"
@@ -1676,7 +1690,9 @@ class Linkedin(object):
 
         :param message_body: Message text to send
         :type message_body: str
-        :param mailbox_urn: Your profile URN ID (mailbox owner)
+        :param mailbox_urn: Your profile URN ID (the part after
+            ``urn:li:fsd_profile:``).  Obtain it once with
+            ``_resolve_public_id_to_urn("your-public-id")`` and store it.
         :type mailbox_urn: str
         :param conversation_urn: Full conversation URN from ``get_conversations_v3()``,
             e.g. ``urn:li:msg_conversation:(urn:li:fsd_profile:xxx,2-yyy==)``

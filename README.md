@@ -369,6 +369,322 @@ List(v->PEOPLE)
 
 It could be possible to document (and implement a nice interface for) this query language - as we add more endpoints to this project, I'm sure it will become more clear if such a thing would be possible (and if it's worth it).
 
+## Updated API Workflow (v2/v3 Methods)
+
+LinkedIn deprecated several legacy Voyager API endpoints (the `/identity/profiles/` family now returns HTTP 410, and `/messaging/conversations` returns HTTP 500). The following documents the updated workflow using the new dash/GraphQL endpoints.
+
+### Prerequisites
+
+```python
+from linkedin_api import Linkedin
+import requests
+
+# Option 1: Authenticate with credentials
+api = Linkedin('your_email@example.com', 'your_password')
+
+# Option 2: Authenticate with cookies (li_at + JSESSIONID from browser)
+cookies_dict = {
+    'li_at': 'YOUR_LI_AT_COOKIE',
+    'JSESSIONID': 'YOUR_JSESSIONID_COOKIE',
+}
+jar = requests.cookies.RequestsCookieJar()
+for key, value in cookies_dict.items():
+    jar.set(key, value)
+
+api = Linkedin(
+    username='your_email@example.com',
+    password='your_password',
+    cookies=jar,
+)
+```
+
+### Step 1: Get Your Mailbox URN
+
+Many messaging methods require your own profile URN ID (`mailbox_urn`). The most reliable way to get it is to resolve your own public ID:
+
+```python
+# Recommended: resolve your own public ID to a URN
+mailbox_urn = api._resolve_public_id_to_urn("your-public-id")
+# Returns e.g. "ACoAABMCK14B..."
+
+# Once you have it, store it — it never changes for a given account.
+```
+
+Alternatively, `get_globals()` can retrieve it from the global navigation data, but it relies on a GraphQL `queryId` hash that LinkedIn may rotate at any time:
+
+```python
+# Alternative (less reliable — queryId may go stale):
+globals_data = api.get_globals()
+# Navigate to: data > feedDashGlobalNavs > primaryItems > [...] > meMenu > profile > entityUrn
+# Extract the ID after "urn:li:fsd_profile:"
+```
+
+### Step 2: Fetch a Profile — `get_profile_v2()`
+
+Replaces the deprecated `get_profile()`. Uses the REST endpoint `/identity/dash/profiles/{urn}?decorationId=...FullProfile-76`.
+
+**Input:**
+```python
+profile = api.get_profile_v2(public_id="billy-g")
+# or
+profile = api.get_profile_v2(urn_id="ACoAABMCK14B...")
+```
+
+**Output:**
+```python
+{
+    "firstName": "Bill",
+    "lastName": "Gates",
+    "headline": "Co-chair, Bill & Melinda Gates Foundation",
+    "summary": "Co-chair of the Bill & Melinda Gates Foundation...",
+    "publicIdentifier": "billy-g",
+    "entityUrn": "urn:li:fsd_profile:ACoAABMCK14B...",
+    "urn_id": "ACoAABMCK14B...",
+    "member_urn": "urn:li:member:12345678",
+    "premium": True,
+    "locationName": "Seattle, Washington, United States",
+    "displayPictureUrl": "https://media.licdn.com/dms/image/...",
+    "img_100_100": "...",
+    "img_200_200": "...",
+    "img_400_400": "...",
+    "img_800_800": "...",
+    "backgroundPictureUrl": "https://media.licdn.com/dms/image/...",
+    "geoLocation": {"geoUrn": "urn:li:geo:12345", "postalCode": "98101"},
+    "geoLocationName": "Seattle, Washington",
+    "industryName": "Philanthropy",
+    "industryUrn": "urn:li:fsd_industry:...",
+    "address": None,
+    "memorialized": False,
+    "versionTag": "..."
+}
+```
+
+### Step 3: Send a Connection Request — `add_connection()`
+
+Send a personalized connection request. Requires either a `profile_urn` (recommended) or will resolve the public ID to a URN automatically.
+
+**Input:**
+```python
+# Resolve URN first (recommended to avoid extra HTTP call)
+urn_id = api._resolve_public_id_to_urn("billy-g")
+
+# Send connection request
+error = api.add_connection(
+    profile_public_id="billy-g",
+    profile_urn=urn_id,
+    message="Hi Bill, I'd love to connect!",  # max 300 chars
+)
+```
+
+**Output:**
+```python
+False   # Success (no error)
+True    # Failure (error occurred)
+```
+
+### Step 4: Fetch Unread Conversations — `get_conversations_v3()`
+
+Fetch conversations with full participant info, last message, and read status. Supports filtering by read/unread and pagination.
+
+**Input:**
+```python
+result = api.get_conversations_v3(
+    mailbox_urn="ACoAABMCK14B...",  # your profile URN ID
+    count=20,                        # max 25 per request
+    read=False,                      # None=all, False=unread, True=read
+)
+```
+
+**Output:**
+```python
+{
+    "conversations": [
+        {
+            "conversation_urn": "urn:li:msg_conversation:(urn:li:fsd_profile:ACoAABMCK14B...,2-YWIzN...==)",
+            "thread_id": "2-YWIzN...==",
+            "read": False,
+            "unread_count": 1,
+            "last_activity_at": 1770210328991,   # epoch ms
+            "participants": [
+                {
+                    "urn_id": "ACoAAB6AUv0B...",
+                    "firstName": "Sarah",
+                    "lastName": "Smith",
+                    "headline": "Software Engineer at Google",
+                    "profileUrl": "https://www.linkedin.com/in/sarahsmith"
+                }
+            ],
+            "last_message": {
+                "text": "Thanks for connecting!",
+                "sender_urn_id": "ACoAAB6AUv0B...",
+                "is_from_me": False,
+                "delivered_at": 1770210328991
+            }
+        },
+        ...
+    ],
+    "next_cursor": "MCY1"  # pass to next call for pagination, None if no more
+}
+```
+
+**Pagination:** Loop until `next_cursor` is `None`:
+```python
+all_conversations = []
+cursor = None
+while True:
+    result = api.get_conversations_v3(
+        mailbox_urn=mailbox_urn, count=25, read=False, next_cursor=cursor
+    )
+    all_conversations.extend(result["conversations"])
+    cursor = result["next_cursor"]
+    if not cursor:
+        break
+```
+
+### Step 5: Read a Conversation Thread — `get_thread_v2()`
+
+Fetch the full message history for a conversation.
+
+**Input:**
+```python
+# Use thread_id from get_conversations_v3()
+thread = api.get_thread_v2(
+    mailbox_urn="ACoAABMCK14B...",         # your profile URN ID
+    messaging_thread_urn="2-YWIzN...==",   # thread_id from conversation
+)
+```
+
+**Output:**
+```python
+{
+    "data": {
+        "messengerMessagesBySyncToken": {
+            "elements": [
+                {
+                    "body": {"text": "Thanks for connecting!"},
+                    "sender": {
+                        "hostIdentityUrn": "urn:li:fsd_profile:ACoAAB6AUv0B..."
+                    },
+                    "deliveredAt": 1770210328991,
+                    ...
+                },
+                ...
+            ],
+            ...
+        }
+    }
+}
+```
+
+**Accessing messages:**
+```python
+messages = thread["data"]["messengerMessagesBySyncToken"]["elements"]
+for msg in messages:
+    sender = msg["sender"]["hostIdentityUrn"]
+    text = msg["body"]["text"]
+    print(f"{sender}: {text}")
+```
+
+### Step 6: Send a Reply — `send_message_v2()`
+
+Send a message to an existing conversation.
+
+**Input:**
+```python
+error = api.send_message_v2(
+    message_body="Happy to connect! How are you?",
+    mailbox_urn="ACoAABMCK14B...",  # your profile URN ID
+    conversation_urn="urn:li:msg_conversation:(urn:li:fsd_profile:ACoAABMCK14B...,2-YWIzN...==)",
+    # use conversation_urn from get_conversations_v3()
+)
+```
+
+**Output:**
+```python
+False   # Success (no error)
+True    # Failure (error occurred)
+```
+
+### Step 7: Mark as Read — `mark_conversation_as_read_v2()`
+
+Mark a conversation as read after processing it.
+
+**Input:**
+```python
+error = api.mark_conversation_as_read_v2(
+    conversation_urn="urn:li:msg_conversation:(urn:li:fsd_profile:ACoAABMCK14B...,2-YWIzN...==)",
+)
+```
+
+**Output:**
+```python
+False   # Success (no error)
+True    # Failure (error occurred)
+```
+
+### Complete End-to-End Example
+
+This example fetches unread conversations, reads the thread, sends a reply, and marks the conversation as read:
+
+```python
+from linkedin_api import Linkedin
+import requests
+
+# Authenticate
+cookies_dict = {'li_at': 'YOUR_LI_AT', 'JSESSIONID': 'YOUR_JSESSIONID'}
+jar = requests.cookies.RequestsCookieJar()
+for k, v in cookies_dict.items():
+    jar.set(k, v)
+api = Linkedin('email@example.com', 'password', cookies=jar)
+
+# Your mailbox URN ID (from get_globals() or your profile)
+mailbox_urn = "ACoAABMCK14B..."
+
+# 1. Fetch unread conversations
+result = api.get_conversations_v3(mailbox_urn=mailbox_urn, count=10, read=False)
+
+for conv in result["conversations"]:
+    names = ", ".join(p["firstName"] + " " + p["lastName"] for p in conv["participants"])
+    print(f"Conversation with {names} (unread: {conv['unread_count']})")
+    print(f"  Last message: {conv['last_message']['text'][:80]}")
+
+    # 2. Read the full thread
+    thread = api.get_thread_v2(
+        mailbox_urn=mailbox_urn,
+        messaging_thread_urn=conv["thread_id"],
+    )
+    messages = thread["data"]["messengerMessagesBySyncToken"]["elements"]
+    for msg in messages:
+        print(f"  > {msg['body']['text'][:100]}")
+
+    # 3. Send a reply
+    first_name = conv["participants"][0]["firstName"]
+    error = api.send_message_v2(
+        message_body=f"Hey {first_name}, thanks for reaching out!",
+        mailbox_urn=mailbox_urn,
+        conversation_urn=conv["conversation_urn"],
+    )
+    if not error:
+        print("  Reply sent!")
+
+    # 4. Mark as read
+    api.mark_conversation_as_read_v2(conversation_urn=conv["conversation_urn"])
+```
+
+### Deprecated Methods
+
+The following methods are **broken** and should not be used:
+
+| Method | Issue | Replacement |
+|--------|-------|-------------|
+| `get_profile()` | `/identity/profiles/` returns HTTP 410 | `get_profile_v2()` |
+| `send_message()` | `/messaging/conversations` returns HTTP 500 | `send_message_v2()` |
+| `get_conversation_details()` | Legacy response format changed | `get_conversations_v3()` |
+| `get_profile_contact_info()` | Uses dead `/identity/profiles/` | No replacement yet |
+| `get_profile_skills()` | Uses dead `/identity/profiles/` | No replacement yet |
+| `get_profile_network_info()` | Uses dead `/identity/profiles/` | No replacement yet |
+| `remove_connection()` | Uses dead `/identity/profiles/` | No replacement yet |
+
 ### Release a new version
 
 1. Bump `version` in `pyproject.toml`

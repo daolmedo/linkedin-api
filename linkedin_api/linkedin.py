@@ -7,6 +7,7 @@ import logging
 import random
 import uuid
 import re
+import warnings
 from operator import itemgetter
 from time import sleep
 from urllib.parse import urlencode, quote
@@ -727,127 +728,262 @@ class Linkedin(object):
 
         return skills
 
+    def _resolve_public_id_to_urn(self, public_id: str) -> Optional[str]:
+        """Resolve a public profile ID to its URN by parsing the profile HTML page.
+
+        This method fetches the HTML profile page and extracts the URN from embedded
+        <code> tags. LinkedIn embeds profile data in these tags, and the target URN
+        appears before the publicIdentifier field.
+
+        :param public_id: LinkedIn public ID (vanity name)
+        :type public_id: str
+        :return: Profile URN ID or None if not found
+        :rtype: Optional[str]
+        """
+        import html as html_parser
+
+        self.logger.debug(f"Resolving public_id '{public_id}' to URN via HTML parsing")
+
+        # Fetch the profile HTML page (not API endpoint)
+        url = f"{self.client.LINKEDIN_BASE_URL}/in/{public_id}/"
+
+        # Use browser-like headers for HTML page request
+        headers = {
+            'user-agent': self.client.session.headers.get('user-agent'),
+            'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'accept-language': 'en-US,en;q=0.9',
+            'cache-control': 'no-cache',
+        }
+
+        # The session already has cookies set, so they'll be included automatically
+        res = self.client.session.get(url, headers=headers, allow_redirects=False)
+
+        if res.status_code == 302 or res.status_code == 301:
+            location = res.headers.get('location', '')
+            if 'authwall' in location:
+                self.logger.error("Authentication required - cookies may be expired")
+                return None
+            self.logger.warning(f"Profile redirected to: {location}")
+            return None
+
+        if res.status_code != 200:
+            self.logger.warning(f"Failed to fetch profile page for '{public_id}': HTTP {res.status_code}")
+            return None
+
+        html_content = res.text
+
+        # Extract URNs from <code> tags
+        code_regex = re.compile(r'<code[^>]*>(.*?)</code>', re.DOTALL)
+
+        for code_match in code_regex.finditer(html_content):
+            # Decode HTML entities
+            code_content = html_parser.unescape(code_match.group(1))
+
+            # Check if this <code> tag contains the public_id
+            if public_id in code_content:
+                # Find all URNs in this code block
+                urn_regex = re.compile(r'urn:li:fsd_profile:[A-Za-z0-9_-]+')
+                urns_in_code = list(set(urn_regex.findall(code_content)))
+
+                if not urns_in_code:
+                    continue
+
+                self.logger.debug(f"Found {len(urns_in_code)} URN(s) in <code> tag containing '{public_id}'")
+
+                # Find the position of publicIdentifier field
+                public_id_pattern = f'"publicIdentifier":"{public_id}"'
+                public_id_index = code_content.find(public_id_pattern)
+
+                if public_id_index != -1:
+                    # Get URNs appearing BEFORE publicIdentifier
+                    urns_before_public_id = [
+                        (urn, code_content.find(urn))
+                        for urn in urns_in_code
+                        if code_content.find(urn) != -1 and code_content.find(urn) < public_id_index
+                    ]
+
+                    if urns_before_public_id:
+                        # Sort by position and take the first one
+                        urns_before_public_id.sort(key=lambda x: x[1])
+                        target_urn = urns_before_public_id[0][0]
+
+                        # Extract just the ID part (after "urn:li:fsd_profile:")
+                        urn_id = target_urn.split(':')[-1]
+                        self.logger.debug(f"Resolved '{public_id}' to URN ID: {urn_id}")
+                        return urn_id
+
+                # Fallback: use first URN in the tag
+                if urns_in_code:
+                    urn_id = urns_in_code[0].split(':')[-1]
+                    self.logger.debug(f"Using first URN from tag: {urn_id}")
+                    return urn_id
+
+        self.logger.warning(f"Could not resolve public_id '{public_id}' to URN")
+        return None
+
     def get_profile(
         self, public_id: Optional[str] = None, urn_id: Optional[str] = None
     ) -> Dict:
         """Fetch data for a given LinkedIn profile.
+
+        .. deprecated::
+            The ``/identity/profiles/`` endpoint family now returns HTTP 410 (Gone).
+            Use :meth:`_resolve_public_id_to_urn` to resolve a public ID to a URN,
+            and specific methods like :meth:`get_profile_experiences`,
+            :meth:`get_profile_skills`, :meth:`get_profile_contact_info`, etc.
+            to fetch profile data.
 
         :param public_id: LinkedIn public ID for a profile
         :type public_id: str, optional
         :param urn_id: LinkedIn URN ID for a profile
         :type urn_id: str, optional
 
-        :return: Profile data
+        :return: Empty dict (endpoint is deprecated)
         :rtype: dict
         """
-        # NOTE this still works for now, but will probably eventually have to be converted to
-        # https://www.linkedin.com/voyager/api/identity/profiles/ACoAAAKT9JQBsH7LwKaE9Myay9WcX8OVGuDq9Uw
-        res = self._fetch(f"/identity/profiles/{public_id or urn_id}/profileView")
+        warnings.warn(
+            "get_profile() is deprecated. The /identity/profiles/ endpoint family "
+            "now returns HTTP 410 (Gone). Use _resolve_public_id_to_urn() for URN "
+            "resolution and specific methods like get_profile_experiences(), "
+            "get_profile_skills(), get_profile_contact_info() for profile data.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        self.logger.warning(
+            "get_profile() is deprecated — the /identity/profiles/ endpoint "
+            "returns HTTP 410. Returning empty dict."
+        )
+        return {}
+
+    def get_profile_v2(
+        self, public_id: Optional[str] = None, urn_id: Optional[str] = None
+    ) -> Dict:
+        """Fetch data for a given LinkedIn profile using the new dash endpoint.
+
+        Uses ``/identity/dash/profiles/{urn}`` with the ``FullProfile-76`` decoration,
+        which replaces the deprecated ``/identity/profiles/`` endpoint family.
+
+        Accepts either ``public_id`` or ``urn_id``. If ``public_id`` is given, it is
+        resolved to a URN via :meth:`_resolve_public_id_to_urn`.
+
+        :param public_id: LinkedIn public ID (vanity name, e.g. "billy-g")
+        :type public_id: str, optional
+        :param urn_id: LinkedIn URN ID for a profile
+        :type urn_id: str, optional
+
+        :return: Profile data dict with keys like ``firstName``, ``lastName``,
+            ``headline``, ``summary``, ``publicIdentifier``, ``entityUrn``,
+            ``urn_id``, ``member_urn``, ``displayPictureUrl``, ``img_*`` variants,
+            ``backgroundPictureUrl``, ``geoLocation``, ``industryName``, etc.
+            Returns empty dict on failure.
+        :rtype: dict
+        """
+        if not public_id and not urn_id:
+            self.logger.error("get_profile_v2() requires public_id or urn_id")
+            return {}
+
+        if public_id and not urn_id:
+            urn_id = self._resolve_public_id_to_urn(public_id)
+            if not urn_id:
+                self.logger.error(
+                    f"Could not resolve public_id '{public_id}' to URN"
+                )
+                return {}
+
+        profile_urn = f"urn:li:fsd_profile:{urn_id}"
+        res = self._fetch(
+            f"/identity/dash/profiles/{profile_urn}"
+            f"?decorationId=com.linkedin.voyager.dash.deco.identity.profile.FullProfile-76",
+            headers={"accept": "application/vnd.linkedin.normalized+json+2.1"},
+        )
 
         data = res.json()
         if data and "status" in data and data["status"] != 200:
-            self.logger.info("request failed: {}".format(data["message"]))
+            self.logger.info("request failed: {}".format(data.get("message", "")))
             return {}
 
-        # massage [profile] data
-        profile = data["profile"]
-        if "miniProfile" in profile:
-            if "picture" in profile["miniProfile"]:
-                profile["displayPictureUrl"] = profile["miniProfile"]["picture"][
-                    "com.linkedin.common.VectorImage"
-                ]["rootUrl"]
+        profile_data = data.get("data", {})
+        if not profile_data:
+            return {}
 
-                images_data = profile["miniProfile"]["picture"][
-                    "com.linkedin.common.VectorImage"
-                ]["artifacts"]
-                for img in images_data:
-                    w, h, url_segment = itemgetter(
-                        "width", "height", "fileIdentifyingUrlPathSegment"
-                    )(img)
-                    profile[f"img_{w}_{h}"] = url_segment
+        # Build a clean profile dict
+        profile = {
+            "firstName": profile_data.get("firstName"),
+            "lastName": profile_data.get("lastName"),
+            "headline": profile_data.get("headline"),
+            "summary": profile_data.get("summary"),
+            "publicIdentifier": profile_data.get("publicIdentifier"),
+            "entityUrn": profile_data.get("entityUrn"),
+            "urn_id": urn_id,
+            "member_urn": profile_data.get("objectUrn"),
+            "premium": profile_data.get("premium"),
+            "memorialized": profile_data.get("memorialized"),
+            "versionTag": profile_data.get("versionTag"),
+            "address": profile_data.get("address"),
+            "locationName": profile_data.get("locationName"),
+        }
 
-            profile["profile_id"] = get_id_from_urn(profile["miniProfile"]["entityUrn"])
-            profile["profile_urn"] = profile["miniProfile"]["entityUrn"]
-            profile["member_urn"] = profile["miniProfile"]["objectUrn"]
-            profile["public_id"] = profile["miniProfile"]["publicIdentifier"]
+        # Extract profile picture URLs
+        profile_picture = profile_data.get("profilePicture", {})
+        display_image = (
+            profile_picture.get("displayImageReference", {}).get("vectorImage", {})
+        )
+        if display_image:
+            root_url = display_image.get("rootUrl", "")
+            profile["displayPictureUrl"] = root_url
+            for artifact in display_image.get("artifacts", []):
+                w = artifact.get("width")
+                h = artifact.get("height")
+                segment = artifact.get("fileIdentifyingUrlPathSegment", "")
+                if w and h:
+                    profile[f"img_{w}_{h}"] = segment
 
-            del profile["miniProfile"]
+        # Extract background picture URL
+        bg_picture = profile_data.get("backgroundPicture", {})
+        bg_image = (
+            bg_picture.get("displayImageReference", {}).get("vectorImage", {})
+        )
+        if not bg_image:
+            bg_image = (
+                bg_picture.get("originalImageReference", {}).get("vectorImage", {})
+            )
+        if bg_image:
+            profile["backgroundPictureUrl"] = bg_image.get("rootUrl", "")
 
-        del profile["defaultLocale"]
-        del profile["supportedLocales"]
-        del profile["versionTag"]
-        del profile["showEducationOnProfileTopCard"]
+        # Extract geo location
+        geo = profile_data.get("geoLocation", {})
+        if geo:
+            profile["geoLocation"] = {
+                "geoUrn": geo.get("geoUrn"),
+                "postalCode": geo.get("postalCode"),
+            }
 
-        # massage [experience] data
-        experience = data["positionView"]["elements"]
-        for item in experience:
-            if "company" in item and "miniCompany" in item["company"]:
-                if "logo" in item["company"]["miniCompany"]:
-                    logo = item["company"]["miniCompany"]["logo"].get(
-                        "com.linkedin.common.VectorImage"
-                    )
-                    if logo:
-                        item["companyLogoUrl"] = logo["rootUrl"]
-                del item["company"]["miniCompany"]
+        # Extract location
+        location = profile_data.get("location", {})
+        if location:
+            profile["location"] = {
+                "countryCode": location.get("countryCode"),
+                "postalCode": location.get("postalCode"),
+            }
 
-        profile["experience"] = experience
+        # Extract industry from included entities
+        included = data.get("included", [])
+        for item in included:
+            if item.get("$type") == "com.linkedin.voyager.dash.common.Industry":
+                profile["industryName"] = item.get("name")
+                profile["industryUrn"] = item.get("entityUrn")
+                break
 
-        # massage [education] data
-        education = data["educationView"]["elements"]
-        for item in education:
-            if "school" in item:
-                if "logo" in item["school"]:
-                    item["school"]["logoUrl"] = item["school"]["logo"][
-                        "com.linkedin.common.VectorImage"
-                    ]["rootUrl"]
-                    del item["school"]["logo"]
-
-        profile["education"] = education
-
-        # massage [languages] data
-        languages = data["languageView"]["elements"]
-        for item in languages:
-            del item["entityUrn"]
-        profile["languages"] = languages
-
-        # massage [publications] data
-        publications = data["publicationView"]["elements"]
-        for item in publications:
-            del item["entityUrn"]
-            for author in item.get("authors", []):
-                del author["entityUrn"]
-        profile["publications"] = publications
-
-        # massage [certifications] data
-        certifications = data["certificationView"]["elements"]
-        for item in certifications:
-            del item["entityUrn"]
-        profile["certifications"] = certifications
-
-        # massage [volunteer] data
-        volunteer = data["volunteerExperienceView"]["elements"]
-        for item in volunteer:
-            del item["entityUrn"]
-        profile["volunteer"] = volunteer
-
-        # massage [honors] data
-        honors = data["honorView"]["elements"]
-        for item in honors:
-            del item["entityUrn"]
-        profile["honors"] = honors
-
-        # massage [projects] data
-        projects = data["projectView"]["elements"]
-        for item in projects:
-            del item["entityUrn"]
-        profile["projects"] = projects
-        # massage [skills] data
-        skills = data["skillView"]["elements"]
-        for item in skills:
-            del item["entityUrn"]
-        profile["skills"] = skills
-
-        profile["urn_id"] = profile["entityUrn"].replace("urn:li:fs_profile:", "")
+        # Extract geo names from included entities
+        geo_urn = geo.get("*geo") or geo.get("geoUrn")
+        if geo_urn:
+            for item in included:
+                if (
+                    item.get("$type") == "com.linkedin.voyager.dash.common.Geo"
+                    and item.get("entityUrn") == geo_urn
+                ):
+                    profile["geoLocationName"] = item.get("defaultLocalizedName")
+                    break
 
         return profile
 
@@ -1291,6 +1427,131 @@ class Linkedin(object):
 
         return res.json()
 
+    def get_conversations_v3(
+        self,
+        mailbox_urn: str,
+        count: int = 20,
+        next_cursor: Optional[str] = None,
+        read: Optional[bool] = None,
+        categories: Optional[List[str]] = None,
+        first_degree_connections: bool = False,
+    ) -> Dict:
+        """Fetch list of conversations with embedded messages and participant info.
+
+        Uses the ``messengerConversationsBySearchCriteria`` endpoint which returns
+        richer data than v2: last message body, sender, participant names, and
+        read/unread status are all included per conversation.
+
+        :param mailbox_urn: URN ID of the mailbox (your profile URN ID)
+        :type mailbox_urn: str
+        :param count: Maximum number of conversations to return
+        :type count: int
+        :param next_cursor: Cursor for pagination (from previous response metadata)
+        :type next_cursor: str, optional
+        :param read: Filter by read status. ``False`` for unread only,
+            ``True`` for read only, ``None`` for all conversations.
+        :type read: bool, optional
+        :param categories: Inbox categories to filter by.
+            Defaults to ``["PRIMARY_INBOX"]``.
+        :type categories: list of str, optional
+        :param first_degree_connections: If ``True``, only return conversations
+            with 1st-degree connections.
+        :type first_degree_connections: bool
+
+        :return: Dictionary with ``conversations`` (list) and ``next_cursor`` (str or None).
+            Each conversation contains: ``conversation_urn``, ``thread_id``,
+            ``read``, ``unread_count``, ``last_activity_at``,
+            ``participants`` (list of dicts with ``urn_id``, ``firstName``,
+            ``lastName``, ``headline``, ``profileUrl`` — self excluded),
+            ``last_message`` (dict with ``text``, ``sender_urn_id``,
+            ``is_from_me``, ``delivered_at``).
+        :rtype: dict
+        """
+        if categories is None:
+            categories = ["PRIMARY_INBOX"]
+
+        if count > 25:
+            count = 25
+
+        query_id = "messengerConversations.737b27144cf922499202658a5345016f"
+
+        cats = ",".join(categories)
+        parts = [
+            f"categories:List({cats})",
+            f"count:{count}",
+            f"firstDegreeConnections:{'true' if first_degree_connections else 'false'}",
+            f"mailboxUrn:urn%3Ali%3Afsd_profile%3A{mailbox_urn}",
+        ]
+
+        if read is not None:
+            parts.append(f"read:{'true' if read else 'false'}")
+
+        if next_cursor:
+            parts.append(f"nextCursor:{next_cursor}")
+
+        variables = f"({','.join(parts)})"
+
+        url = f"/voyagerMessagingGraphQL/graphql?queryId={query_id}&variables={variables}"
+        res = self._fetch(url)
+
+        data = res.json()
+
+        raw = (
+            data.get("data", {}).get("messengerConversationsBySearchCriteria", {})
+        )
+        if not raw:
+            return {"conversations": [], "next_cursor": None}
+
+        parsed = []
+        for conv in raw.get("elements", []):
+            # Extract other participants (exclude self)
+            participants = []
+            for p in conv.get("conversationParticipants", []):
+                urn = p.get("hostIdentityUrn", "")
+                if mailbox_urn in urn:
+                    continue
+                member = p.get("participantType", {}).get("member", {})
+                fn = member.get("firstName", {})
+                ln = member.get("lastName", {})
+                hl = member.get("headline", {})
+                participants.append({
+                    "urn_id": urn.replace("urn:li:fsd_profile:", ""),
+                    "firstName": fn.get("text", "") if isinstance(fn, dict) else str(fn),
+                    "lastName": ln.get("text", "") if isinstance(ln, dict) else str(ln),
+                    "headline": hl.get("text", "") if isinstance(hl, dict) else str(hl),
+                    "profileUrl": member.get("profileUrl"),
+                })
+
+            # Extract last message
+            last_message = None
+            msgs = conv.get("messages", {}).get("elements", [])
+            if msgs:
+                msg = msgs[0]
+                sender_urn = msg.get("sender", {}).get("hostIdentityUrn", "")
+                last_message = {
+                    "text": msg.get("body", {}).get("text", ""),
+                    "sender_urn_id": sender_urn.replace("urn:li:fsd_profile:", ""),
+                    "is_from_me": mailbox_urn in sender_urn,
+                    "delivered_at": msg.get("deliveredAt"),
+                }
+
+            thread_id = conv.get("backendUrn", "").replace(
+                "urn:li:messagingThread:", ""
+            )
+
+            parsed.append({
+                "conversation_urn": conv.get("entityUrn"),
+                "thread_id": thread_id,
+                "read": conv.get("read"),
+                "unread_count": conv.get("unreadCount", 0),
+                "last_activity_at": conv.get("lastActivityAt"),
+                "participants": participants,
+                "last_message": last_message,
+            })
+
+        next_cursor = raw.get("metadata", {}).get("nextCursor")
+        return {"conversations": parsed, "next_cursor": next_cursor}
+
     def get_thread_v2(self, mailbox_urn: str, messaging_thread_urn: str) -> Dict:
         """Fetch a thread of messages using the new LinkedIn Voyager API.
 
@@ -1405,6 +1666,90 @@ class Linkedin(object):
 
         return res.status_code != 200
 
+    def send_message_v2(
+        self,
+        message_body: str,
+        mailbox_urn: str,
+        conversation_urn: str,
+    ):
+        """Send a message to an existing conversation using the new dash endpoint.
+
+        :param message_body: Message text to send
+        :type message_body: str
+        :param mailbox_urn: Your profile URN ID (mailbox owner)
+        :type mailbox_urn: str
+        :param conversation_urn: Full conversation URN from ``get_conversations_v3()``,
+            e.g. ``urn:li:msg_conversation:(urn:li:fsd_profile:xxx,2-yyy==)``
+        :type conversation_urn: str
+
+        :return: Error state. True if error occurred.
+        :rtype: bool
+        """
+        payload = {
+            "message": {
+                "body": {
+                    "attributes": [],
+                    "text": message_body,
+                },
+                "renderContentUnions": [],
+                "conversationUrn": conversation_urn,
+                "originToken": str(uuid.uuid4()),
+            },
+            "mailboxUrn": f"urn:li:fsd_profile:{mailbox_urn}",
+            "trackingId": generate_trackingId_as_charString(),
+            "dedupeByClientGeneratedToken": False,
+        }
+
+        res = self._post(
+            "/voyagerMessagingDashMessengerMessages?action=createMessage",
+            data=json.dumps(payload),
+            headers={
+                "accept": "application/json",
+                "Content-Type": "text/plain;charset=UTF-8",
+            },
+        )
+
+        return res.status_code != 200
+
+    def mark_conversation_as_read_v2(
+        self,
+        conversation_urn: str,
+    ):
+        """Mark a conversation as read using the new dash endpoint.
+
+        :param conversation_urn: Full conversation URN from ``get_conversations_v3()``,
+            e.g. ``urn:li:msg_conversation:(urn:li:fsd_profile:xxx,2-yyy==)``
+        :type conversation_urn: str
+
+        :return: Error state. True if error occurred.
+        :rtype: bool
+        """
+        from urllib.parse import quote
+
+        payload = {
+            "entities": {
+                conversation_urn: {
+                    "patch": {
+                        "$set": {
+                            "read": True,
+                        }
+                    }
+                }
+            }
+        }
+
+        encoded_urn = quote(conversation_urn, safe="")
+        res = self._post(
+            f"/voyagerMessagingDashMessengerConversations?ids=List({encoded_urn})",
+            data=json.dumps(payload),
+            headers={
+                "accept": "application/json",
+                "Content-Type": "text/plain;charset=UTF-8",
+            },
+        )
+
+        return res.status_code != 200
+
     def get_user_profile(self, use_cache=True) -> Dict:
         """Get the current user profile. If not cached, a network request will be fired.
 
@@ -1502,12 +1847,12 @@ class Linkedin(object):
             return False
 
         if not profile_urn:
-            profile_urn_string = self.get_profile(public_id=profile_public_id)[
-                "profile_urn"
-            ]
-            # Returns string of the form 'urn:li:fs_miniProfile:ACoAACX1hoMBvWqTY21JGe0z91mnmjmLy9Wen4w'
-            # We extract the last part of the string
-            profile_urn = profile_urn_string.split(":")[-1]
+            profile_urn = self._resolve_public_id_to_urn(profile_public_id)
+            if not profile_urn:
+                self.logger.error(
+                    f"Could not resolve public_id '{profile_public_id}' to URN"
+                )
+                return True
 
         payload = {
             "invitee": {
